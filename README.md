@@ -1,36 +1,84 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Native AI — Knowledge Graph Visualizer
 
-## Getting Started
+**Live:** https://native-ai-knowledge-graph.vercel.app
 
-First, run the development server:
+Interactive knowledge graph built from a live Supabase database (Native AI messaging platform). Queries real data in real-time — no static exports, no mocked data.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+---
+
+## What It Does
+
+Takes a **relational Supabase database** (31 tables, ~4,000 rows) and renders it as an **interactive force-directed graph** in the browser. Select an organization, toggle entity types on/off, click any node to inspect its properties.
+
+**Graph model:** 9 node types, 16 relationship types, ~766 nodes and ~785 edges per organization.
+
+## Architecture
+
+```
+Browser (Next.js)          Vercel (Server)              Supabase
+┌──────────────┐      ┌─────────────────────┐     ┌──────────────┐
+│ react-force- │ ───► │ /api/graph          │ ──► │ PostgreSQL   │
+│ graph-2d     │      │   fetch 9 tables    │     │ REST API     │
+│              │      │   transform → graph │     │ (service_role│
+│ Dashboard    │      │   return JSON       │     │  key, RLS    │
+│ Filters      │      │                     │     │  bypassed)   │
+│ Detail Panel │      │ /api/organizations  │     │              │
+└──────────────┘      └─────────────────────┘     └──────────────┘
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+**Key design decision:** The service_role key never reaches the client. API routes run server-side on Vercel, acting as a secure proxy to Supabase.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Why a Graph?
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Relational databases store data in flat tables connected by foreign keys. This works for CRUD operations but obscures the **topology** of the data — how entities relate to each other across tables.
 
-## Learn More
+The insight behind this project: **foreign keys ARE edges**. Every `organization_id`, `channel_id`, `author_id`, `meeting_id`, `source_insight_id` column is an implicit relationship. By extracting these into an explicit graph, patterns become visible that SQL queries alone can't surface:
 
-To learn more about Next.js, take a look at the following resources:
+- **Intelligence chains:** Meeting → Insight → Task (how meetings generate action items)
+- **Communication topology:** Which users post in which channels, who mentions whom
+- **Knowledge provenance:** Context → Meeting → Organization (where knowledge originates)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Graph Model
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Node Type (9) | Source Table | Key Properties |
+|---|---|---|
+| Organization | `organizations` | name, slug, has_brain |
+| User | `profiles` | full_name, role |
+| Channel | `channels` | name, type, member_count |
+| Message | `messages` | content_preview, is_ai_response |
+| Contact | `contacts` | name, email, company, relationship_type |
+| Meeting | `meetings` | title, platform, participants |
+| Insight | `insights` | type, title, confidence, impact |
+| Task | `tasks` | title, assignee, state, priority |
+| Context | `contexts` | title, tags, source_id |
 
-## Deploy on Vercel
+**16 edge types** derived from foreign keys (`MEMBER_OF`, `HAS_CHANNEL`, `POSTED_IN`, `AUTHORED_BY`, `REPLIES_TO`, `IN_ORG`, `REPORTS_TO`, `FROM_MEETING`, `FROM_INSIGHT`) and join tables (`MENTIONS`, `READ_BY`).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## What I Engineered
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. **Schema-to-graph transform** — Automated conversion of relational FKs into graph edges with referential integrity validation. Written first in Python, then ported to TypeScript for the web app.
+
+2. **Parallel data fetching** — 9 Supabase tables queried concurrently. Messages require two-phase fetch (channels first, then messages by channel_id) since they lack a direct `organization_id` FK.
+
+3. **Performance-conscious visualization** — Messages (~800/org) OFF by default to keep graph under ~800 nodes. Custom Canvas rendering with node sizing by entity importance and 50-tick warmup for stable initial layout.
+
+4. **Security model** — `service_role` key stays server-side in Vercel env vars. No `NEXT_PUBLIC_` prefix. Browser never sees credentials.
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 16, TypeScript, Tailwind CSS |
+| Visualization | react-force-graph-2d (HTML5 Canvas) |
+| Backend | Next.js API Routes (server-side) |
+| Database | Supabase PostgreSQL (REST API) |
+| Deployment | Vercel |
+
+## Running Locally
+
+```bash
+cd kg-web
+cp .env.example .env.local   # add Supabase credentials
+npm install
+npm run dev                   # http://localhost:3000
+```
