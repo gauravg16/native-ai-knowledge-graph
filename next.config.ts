@@ -1,7 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  transpilePackages: ["react-force-graph-2d", "force-graph"],
+  turbopack: {
+    root: __dirname,
+  },
 };
 
 export default nextConfig;
