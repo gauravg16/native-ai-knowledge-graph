@@ -66,3 +66,41 @@ export interface OrgSummary {
   counts: Record<string, number>;
   total: number;
 }
+
+// V1 interaction types
+
+export type InteractionMode = "explore" | "focus" | "pathfinding";
+
+export interface FocusState {
+  nodeId: string;
+  neighborIds: Set<string>;
+  linkKeys: Set<string>;
+}
+
+export interface PathState {
+  startNodeId: string | null;
+  endNodeId: string | null;
+  path: string[] | null;
+  pathLinkKeys: Set<string>;
+}
+
+export interface NeighborInfo {
+  node: GraphNode;
+  link: GraphLink;
+  direction: "outgoing" | "incoming";
+}
+
+export interface AdjacencyEntry {
+  neighbors: Set<string>;
+  links: GraphLink[];
+}
+
+export type AdjacencyIndex = Map<string, AdjacencyEntry>;
+
+export interface ChainStats {
+  meetingCount: number;
+  insightCount: number;
+  taskCount: number;
+  meetingToInsightEdges: number;
+  insightToTaskEdges: number;
+}
