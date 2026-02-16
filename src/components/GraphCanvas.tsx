@@ -113,7 +113,7 @@ const GraphCanvas = forwardRef<GraphCanvasHandle, GraphCanvasProps>(
         const cfg = NODE_CONFIG[node.type as keyof typeof NODE_CONFIG];
         if (!cfg) return;
 
-        const baseRadius = Math.sqrt(cfg.size) * 1.8;
+        const baseRadius = Math.sqrt(node.val ?? cfg.size) * 1.8;
         const x = node.x ?? 0;
         const y = node.y ?? 0;
         const nodeId = node.id as string;

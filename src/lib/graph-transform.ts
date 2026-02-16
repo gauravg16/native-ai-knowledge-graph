@@ -68,6 +68,101 @@ function truncate(s: unknown, max: number): string {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Name Resolver — fuzzy match text fields to contact/profile nodes   */
+/* ------------------------------------------------------------------ */
+
+type NameResolver = Map<string, string[]>;
+
+function buildNameResolver(
+  contacts: Record<string, unknown>[],
+  profiles: Record<string, unknown>[],
+): NameResolver {
+  const map: NameResolver = new Map();
+
+  const addEntry = (key: string, nodeIdStr: string) => {
+    const k = key.trim().toLowerCase();
+    if (!k || k.length < 2) return;
+    const existing = map.get(k);
+    if (existing) {
+      if (!existing.includes(nodeIdStr)) existing.push(nodeIdStr);
+    } else {
+      map.set(k, [nodeIdStr]);
+    }
+  };
+
+  // Index contacts by name, aliases, email
+  for (const c of contacts) {
+    const nid = nodeId("contact", c.id as string);
+    if (c.name) addEntry(c.name as string, nid);
+    if (c.email) addEntry(c.email as string, nid);
+    const aliases = Array.isArray(c.aliases) ? c.aliases : [];
+    for (const alias of aliases) {
+      if (typeof alias === "string") addEntry(alias, nid);
+    }
+  }
+
+  // Index profiles by full_name
+  for (const p of profiles) {
+    const nid = nodeId("user", p.id as string);
+    if (p.full_name) addEntry(p.full_name as string, nid);
+  }
+
+  return map;
+}
+
+function resolvePersonText(text: unknown, resolver: NameResolver): string[] {
+  if (typeof text !== "string" || !text.trim()) return [];
+  const normalized = text.trim().toLowerCase();
+
+  // 1. Exact lookup
+  const exact = resolver.get(normalized);
+  if (exact) return exact;
+
+  // 2. "Name <email>" format — try name part, then email part
+  const angleMatch = normalized.match(/^(.+?)\s*<(.+?)>$/);
+  if (angleMatch) {
+    const namePart = resolver.get(angleMatch[1].trim());
+    if (namePart) return namePart;
+    const emailPart = resolver.get(angleMatch[2].trim());
+    if (emailPart) return emailPart;
+  }
+
+  // 3. Strip honorifics
+  const honorifics = ["sir ", "mr ", "ms ", "mrs ", "dr "];
+  for (const h of honorifics) {
+    if (normalized.startsWith(h)) {
+      const stripped = resolver.get(normalized.slice(h.length));
+      if (stripped) return stripped;
+    }
+  }
+
+  // 4. No match (e.g., "Ai Assistant", "User", "Native")
+  return [];
+}
+
+function resolveMultiPerson(text: unknown, resolver: NameResolver): string[] {
+  if (typeof text !== "string" || !text.trim()) return [];
+
+  // Split on ", " and " and " (case-insensitive)
+  const fragments = text.split(/,\s*|\s+and\s+/i).map(s => s.trim()).filter(Boolean);
+
+  // If only one fragment, resolve directly (avoids splitting names like "Jasminder Singh Gulati")
+  if (fragments.length <= 1) return resolvePersonText(text, resolver);
+
+  const results: string[] = [];
+  const seen = new Set<string>();
+  for (const fragment of fragments) {
+    for (const id of resolvePersonText(fragment, resolver)) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        results.push(id);
+      }
+    }
+  }
+  return results;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main transform                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -114,6 +209,9 @@ export function transformToGraph(input: TransformInput): GraphResponse {
     );
   }
 
+  // Build name resolver from ALL contacts + profiles (regardless of enabledTypes)
+  const resolver = buildNameResolver(input.contacts, input.profiles);
+
   /* --- Users (profiles) --- */
   if (input.enabledTypes.has("user")) {
     for (const p of input.profiles) {
@@ -159,7 +257,6 @@ export function transformToGraph(input: TransformInput): GraphResponse {
           created_at: c.created_at,
         }),
       );
-      if (orgNid) deferLink(nodeId("contact", c.id as string), orgNid, "IN_ORG");
       if (c.reports_to) {
         deferLink(
           nodeId("contact", c.id as string),
@@ -184,7 +281,12 @@ export function transformToGraph(input: TransformInput): GraphResponse {
           created_at: m.created_at,
         }),
       );
-      if (orgNid) deferLink(nodeId("meeting", m.id as string), orgNid, "IN_ORG");
+      // Resolve participants → person edges
+      for (const participant of parts) {
+        for (const personId of resolvePersonText(participant, resolver)) {
+          deferLink(personId, nodeId("meeting", m.id as string), "PARTICIPATED_IN");
+        }
+      }
     }
   }
 
@@ -202,7 +304,12 @@ export function transformToGraph(input: TransformInput): GraphResponse {
           created_at: i.created_at,
         }),
       );
-      if (orgNid) deferLink(nodeId("insight", i.id as string), orgNid, "IN_ORG");
+      // Resolve owner text → person edges
+      if (i.owner) {
+        for (const personId of resolvePersonText(i.owner, resolver)) {
+          deferLink(nodeId("insight", i.id as string), personId, "OWNED_BY");
+        }
+      }
       if (i.meeting_id) {
         deferLink(
           nodeId("insight", i.id as string),
@@ -225,7 +332,12 @@ export function transformToGraph(input: TransformInput): GraphResponse {
           created_at: t.created_at,
         }),
       );
-      if (orgNid) deferLink(nodeId("task", t.id as string), orgNid, "IN_ORG");
+      // Resolve assignee text → person edges
+      if (t.assignee) {
+        for (const personId of resolveMultiPerson(t.assignee, resolver)) {
+          deferLink(nodeId("task", t.id as string), personId, "ASSIGNED_TO");
+        }
+      }
       if (t.source_insight_id) {
         deferLink(
           nodeId("task", t.id as string),
@@ -247,7 +359,6 @@ export function transformToGraph(input: TransformInput): GraphResponse {
           created_at: cx.created_at,
         }),
       );
-      if (orgNid) deferLink(nodeId("context", cx.id as string), orgNid, "IN_ORG");
       if (cx.meeting_id) {
         deferLink(
           nodeId("context", cx.id as string),

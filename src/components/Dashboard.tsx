@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   NodeType,
+  EdgeType,
   GraphNode,
   GraphResponse,
   OrgSummary,
@@ -10,9 +11,10 @@ import {
   InteractionMode,
   FocusState,
   PathState,
+  TimeRange,
 } from "@/lib/types";
-import { DEFAULT_ENABLED_TYPES, ALL_NODE_TYPES } from "@/lib/constants";
-import { buildAdjacencyIndex, getNeighbors, bfsShortestPath, getLinkKey } from "@/lib/graph-utils";
+import { DEFAULT_ENABLED_TYPES, EDGE_CONFIG } from "@/lib/constants";
+import { getNeighbors, bfsShortestPath, getLinkKey, applyGraphFilters } from "@/lib/graph-utils";
 import GraphCanvas, { GraphCanvasHandle } from "./GraphCanvas";
 import OrgSelector from "./OrgSelector";
 import NodeTypeFilter from "./NodeTypeFilter";
@@ -50,18 +52,25 @@ export default function Dashboard() {
   const [pathState, setPathState] = useState<PathState>(EMPTY_PATH);
   const [searchResults, setSearchResults] = useState<GraphNode[]>([]);
 
+  // V2 filter state
+  const [enabledEdgeTypes, setEnabledEdgeTypes] = useState<Set<EdgeType>>(
+    () => new Set(Object.keys(EDGE_CONFIG) as EdgeType[]),
+  );
+  const [hideOrphans, setHideOrphans] = useState(false);
+  const [timeRange, setTimeRange] = useState<TimeRange>("all");
+
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<GraphCanvasHandle>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const graphData = graphResponse?.data || EMPTY_GRAPH;
+  const rawGraphData = graphResponse?.data || EMPTY_GRAPH;
   const stats = graphResponse?.stats || null;
   const counts = stats?.byType || ({} as Record<NodeType, number>);
 
-  // Build adjacency index
-  const adjacencyIndex = useMemo(
-    () => buildAdjacencyIndex(graphData),
-    [graphData],
+  // V2 filter pipeline: time → edge types → orphans → dynamic sizing → adjacency
+  const { data: graphData, adjacency: adjacencyIndex } = useMemo(
+    () => applyGraphFilters(rawGraphData, { enabledEdgeTypes, hideOrphans, timeRange }),
+    [rawGraphData, enabledEdgeTypes, hideOrphans, timeRange],
   );
 
   // Compute neighbors for selected node
@@ -165,6 +174,15 @@ export default function Dashboard() {
       return next;
     });
   };
+
+  const handleToggleEdgeType = useCallback((type: EdgeType) => {
+    setEnabledEdgeTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  }, []);
 
   // --- Focus Mode ---
 
@@ -398,6 +416,8 @@ export default function Dashboard() {
         adjacency={adjacencyIndex}
         loading={loading}
         onNodeClick={handleNavigateToNode}
+        timeRange={timeRange}
+        onTimeRangeChange={setTimeRange}
       />
 
       {/* Main area */}
@@ -410,7 +430,12 @@ export default function Dashboard() {
             onToggle={handleToggleType}
           />
           <div className="mt-4 pt-3 border-t border-slate-800">
-            <GraphLegend />
+            <GraphLegend
+              enabledEdgeTypes={enabledEdgeTypes}
+              onToggleEdgeType={handleToggleEdgeType}
+              hideOrphans={hideOrphans}
+              onToggleOrphans={() => setHideOrphans((v) => !v)}
+            />
           </div>
         </aside>
 

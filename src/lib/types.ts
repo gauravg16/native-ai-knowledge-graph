@@ -20,7 +20,10 @@ export type EdgeType =
   | "FROM_MEETING"
   | "FROM_INSIGHT"
   | "MENTIONS"
-  | "READ_BY";
+  | "READ_BY"
+  | "ASSIGNED_TO"
+  | "OWNED_BY"
+  | "PARTICIPATED_IN";
 
 export interface GraphNode {
   id: string;
@@ -103,4 +106,14 @@ export interface ChainStats {
   taskCount: number;
   meetingToInsightEdges: number;
   insightToTaskEdges: number;
+}
+
+// V2 filter types
+
+export type TimeRange = "7d" | "30d" | "90d" | "all";
+
+export interface GraphFilterState {
+  enabledEdgeTypes: Set<EdgeType>;
+  hideOrphans: boolean;
+  timeRange: TimeRange;
 }

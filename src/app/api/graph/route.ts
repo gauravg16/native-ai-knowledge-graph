@@ -43,14 +43,13 @@ export async function GET(request: NextRequest) {
         .single(),
     );
 
-    if (enabledTypes.has("user")) {
-      fetches.profiles = q(
-        supabaseAdmin
-          .from("profiles")
-          .select("id, organization_id, full_name, role, response_persona, created_at")
-          .eq("organization_id", orgId),
-      );
-    }
+    // Always fetch profiles (needed for name resolution even when "user" type is off)
+    fetches.profiles = q(
+      supabaseAdmin
+        .from("profiles")
+        .select("id, organization_id, full_name, role, response_persona, created_at")
+        .eq("organization_id", orgId),
+    );
 
     if (enabledTypes.has("channel") || enabledTypes.has("message")) {
       fetches.channels = q(
@@ -61,16 +60,15 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    if (enabledTypes.has("contact")) {
-      fetches.contacts = q(
-        supabaseAdmin
-          .from("contacts")
-          .select(
-            "id, organization_id, name, email, role, department, relationship_type, reports_to, company_name, location, is_primary_contact, tags, created_at",
-          )
-          .eq("organization_id", orgId),
-      );
-    }
+    // Always fetch contacts (needed for name resolution even when "contact" type is off)
+    fetches.contacts = q(
+      supabaseAdmin
+        .from("contacts")
+        .select(
+          "id, organization_id, name, email, aliases, role, department, relationship_type, reports_to, company_name, location, is_primary_contact, tags, created_at",
+        )
+        .eq("organization_id", orgId),
+    );
 
     if (enabledTypes.has("meeting")) {
       fetches.meetings = q(

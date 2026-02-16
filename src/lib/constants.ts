@@ -29,7 +29,10 @@ export const EDGE_CONFIG: Record<
   FROM_MEETING: { color: "rgba(244,63,94,0.3)",    width: 1.5, label: "From Meeting" },
   FROM_INSIGHT: { color: "rgba(234,179,8,0.3)",    width: 1.5, label: "From Insight" },
   MENTIONS:     { color: "rgba(168,85,247,0.4)",   width: 2,   label: "Mentions" },
-  READ_BY:      { color: "rgba(100,116,139,0.1)",  width: 0.3, label: "Read By" },
+  READ_BY:         { color: "rgba(100,116,139,0.1)",  width: 0.3, label: "Read By" },
+  ASSIGNED_TO:     { color: "rgba(6,182,212,0.5)",    width: 2,   label: "Assigned To" },
+  OWNED_BY:        { color: "rgba(234,179,8,0.5)",    width: 2,   label: "Owned By" },
+  PARTICIPATED_IN: { color: "rgba(244,63,94,0.5)",    width: 2,   label: "Participated In" },
 };
 
 export const CANVAS_BG = "#0f172a";
