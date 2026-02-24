@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { GraphNode } from "@/lib/types";
-import { NODE_CONFIG } from "@/lib/constants";
-import { fuzzyMatchNodes } from "@/lib/graph-utils";
+import { GraphNode } from "../lib/types";
+import { NODE_CONFIG } from "../lib/constants";
+import { fuzzyMatchNodes } from "../lib/graph-utils";
 
 interface NodeSearchProps {
   nodes: GraphNode[];

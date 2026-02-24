@@ -12,9 +12,18 @@ import {
   FocusState,
   PathState,
   TimeRange,
-} from "@/lib/types";
-import { DEFAULT_ENABLED_TYPES, EDGE_CONFIG } from "@/lib/constants";
-import { getNeighbors, bfsShortestPath, getLinkKey, applyGraphFilters } from "@/lib/graph-utils";
+} from "../lib/types";
+import { DEFAULT_ENABLED_TYPES, EDGE_CONFIG } from "../lib/constants";
+import {
+  getNeighbors,
+  bfsShortestPath,
+  getLinkKey,
+  applyGraphFilters,
+  computePipelineScorecard,
+  computePersonWorkloads,
+  computeAttentionQueue,
+  computeNodeAnalytics,
+} from "../lib/graph-utils";
 import GraphCanvas, { GraphCanvasHandle } from "./GraphCanvas";
 import OrgSelector from "./OrgSelector";
 import NodeTypeFilter from "./NodeTypeFilter";
@@ -23,6 +32,7 @@ import NodeDetail from "./NodeDetail";
 import GraphLegend from "./GraphLegend";
 import NodeSearch from "./NodeSearch";
 import PathFinder from "./PathFinder";
+import AttentionBanner from "./AttentionBanner";
 
 const EMPTY_GRAPH: GraphData = { nodes: [], links: [] };
 const EMPTY_PATH: PathState = {
@@ -51,12 +61,13 @@ export default function Dashboard() {
   const [focusState, setFocusState] = useState<FocusState | null>(null);
   const [pathState, setPathState] = useState<PathState>(EMPTY_PATH);
   const [searchResults, setSearchResults] = useState<GraphNode[]>([]);
+  const [attentionHighlightCount, setAttentionHighlightCount] = useState(0);
 
   // V2 filter state
   const [enabledEdgeTypes, setEnabledEdgeTypes] = useState<Set<EdgeType>>(
     () => new Set(Object.keys(EDGE_CONFIG) as EdgeType[]),
   );
-  const [hideOrphans, setHideOrphans] = useState(false);
+  const [hideOrphans, setHideOrphans] = useState(true);
   const [timeRange, setTimeRange] = useState<TimeRange>("all");
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -73,6 +84,33 @@ export default function Dashboard() {
     [rawGraphData, enabledEdgeTypes, hideOrphans, timeRange],
   );
 
+  // Compute filtered edge counts for dynamic legend
+  const filteredEdgeCounts = useMemo(() => {
+    const counts = {} as Record<EdgeType, number>;
+    for (const et of Object.keys(EDGE_CONFIG) as EdgeType[]) counts[et] = 0;
+    for (const link of graphData.links) {
+      const t = typeof link.type === "string" ? link.type as EdgeType : undefined;
+      if (t && t in EDGE_CONFIG) counts[t]++;
+    }
+    return counts;
+  }, [graphData.links]);
+
+  // V3 analytics: pipeline scorecard + workloads + attention queue
+  const scorecard = useMemo(
+    () => computePipelineScorecard(graphData, adjacencyIndex),
+    [graphData, adjacencyIndex],
+  );
+
+  const workloads = useMemo(
+    () => computePersonWorkloads(graphData, adjacencyIndex),
+    [graphData, adjacencyIndex],
+  );
+
+  const attentionItems = useMemo(
+    () => computeAttentionQueue(graphData, adjacencyIndex, scorecard, workloads),
+    [graphData, adjacencyIndex, scorecard, workloads],
+  );
+
   // Compute neighbors for selected node
   const selectedNodeNeighbors = useMemo(
     () =>
@@ -80,6 +118,15 @@ export default function Dashboard() {
         ? getNeighbors(selectedNode.id, graphData, adjacencyIndex)
         : [],
     [selectedNode, graphData, adjacencyIndex],
+  );
+
+  // Node analytics for selected node
+  const selectedNodeAnalytics = useMemo(
+    () =>
+      selectedNode
+        ? computeNodeAnalytics(selectedNode, graphData, adjacencyIndex, workloads)
+        : null,
+    [selectedNode, graphData, adjacencyIndex, workloads],
   );
 
   // Search highlight IDs
@@ -286,6 +333,14 @@ export default function Dashboard() {
     graphRef.current?.centerOnNode(node, 3);
   }, []);
 
+  const handleNavigateToNodeId = useCallback(
+    (nodeId: string) => {
+      const node = graphData.nodes.find((n) => n.id === nodeId);
+      if (node) handleNavigateToNode(node);
+    },
+    [graphData.nodes, handleNavigateToNode],
+  );
+
   // --- Search ---
 
   const handleSearchSelect = useCallback((node: GraphNode) => {
@@ -303,7 +358,10 @@ export default function Dashboard() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (mode === "focus") {
+        if (attentionHighlightCount > 0) {
+          setSearchResults([]);
+          setAttentionHighlightCount(0);
+        } else if (mode === "focus") {
           handleExitFocus();
         } else if (mode === "pathfinding") {
           handlePathDeactivate();
@@ -323,10 +381,10 @@ export default function Dashboard() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [mode, handleExitFocus, handlePathDeactivate]);
+  }, [mode, handleExitFocus, handlePathDeactivate, attentionHighlightCount]);
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950">
+    <div className="relative flex flex-col h-screen bg-slate-950">
       {/* Header */}
       <header className="flex items-center justify-between px-5 py-3 bg-slate-900 border-b border-slate-800">
         <div className="flex items-center gap-3">
@@ -416,8 +474,22 @@ export default function Dashboard() {
         adjacency={adjacencyIndex}
         loading={loading}
         onNodeClick={handleNavigateToNode}
+        onFocusNode={handleNodeFocus}
+        focusNodeId={focusState?.nodeId ?? null}
         timeRange={timeRange}
         onTimeRangeChange={setTimeRange}
+        scorecard={scorecard}
+        workloads={workloads}
+      />
+
+      {/* Attention Banner */}
+      <AttentionBanner
+        items={attentionItems}
+        onHighlight={(nodeIds) => {
+          const nodes = graphData.nodes.filter((n) => new Set(nodeIds).has(n.id));
+          setSearchResults(nodes);
+          setAttentionHighlightCount(nodes.length);
+        }}
       />
 
       {/* Main area */}
@@ -428,6 +500,7 @@ export default function Dashboard() {
             enabledTypes={enabledTypes}
             counts={counts}
             onToggle={handleToggleType}
+            onSetTypes={setEnabledTypes}
           />
           <div className="mt-4 pt-3 border-t border-slate-800">
             <GraphLegend
@@ -435,6 +508,7 @@ export default function Dashboard() {
               onToggleEdgeType={handleToggleEdgeType}
               hideOrphans={hideOrphans}
               onToggleOrphans={() => setHideOrphans((v) => !v)}
+              edgeCounts={filteredEdgeCounts}
             />
           </div>
         </aside>
@@ -512,6 +586,29 @@ export default function Dashboard() {
             />
           )}
 
+          {/* Attention highlight clear chip */}
+          {attentionHighlightCount > 0 && searchHighlightIds.size > 0 && (
+            <div
+              className="absolute top-3 right-3 z-30
+                          bg-slate-800/90 border border-slate-600 rounded-lg px-3 py-1.5
+                          flex items-center gap-2 backdrop-blur-sm"
+            >
+              <span className="text-xs text-slate-300">
+                {attentionHighlightCount} nodes highlighted
+              </span>
+              <button
+                onClick={() => {
+                  setSearchResults([]);
+                  setAttentionHighlightCount(0);
+                }}
+                className="text-xs text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600
+                           px-2 py-0.5 rounded transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+
           {/* Fetched timestamp */}
           {graphResponse?.fetchedAt && (
             <div className="absolute bottom-3 left-3 text-[10px] text-slate-600">
@@ -528,7 +625,9 @@ export default function Dashboard() {
         onClose={() => setSelectedNode(null)}
         neighbors={selectedNodeNeighbors}
         onNavigateToNode={handleNavigateToNode}
+        onNavigateToNodeId={handleNavigateToNodeId}
         onFocusNode={handleNodeFocus}
+        analytics={selectedNodeAnalytics}
       />
     </div>
   );

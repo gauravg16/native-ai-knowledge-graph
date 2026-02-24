@@ -54,6 +54,7 @@ export interface GraphStats {
   totalLinks: number;
   byType: Record<NodeType, number>;
   orgName: string;
+  edgeCounts: Record<EdgeType, number>;
 }
 
 export interface GraphResponse {
@@ -116,4 +117,41 @@ export interface GraphFilterState {
   enabledEdgeTypes: Set<EdgeType>;
   hideOrphans: boolean;
   timeRange: TimeRange;
+}
+
+// V3 analytics types
+
+export interface PipelineScorecard {
+  meetingToInsightRate: number;   // 0.0–1.0
+  insightToTaskRate: number;      // 0.0–1.0
+  endToEndYield: number;          // 0.0–1.0 (meetings that yielded tasks)
+  taskCompletionRate: number;     // 0.0–1.0
+  overdueTasks: number;
+  deadEndMeetings: number;        // meetings with 0 insights
+  staleInsights: number;          // high-confidence, >30d old, no task
+  totalMeetings: number;
+  totalInsights: number;
+  totalTasks: number;
+}
+
+export interface PersonWorkload {
+  nodeId: string;
+  label: string;
+  type: "user" | "contact";
+  totalTasks: number;
+  openTasks: number;
+  overdueTasks: number;
+  completedTasks: number;
+  insightsOwned: number;
+  meetingsAttended: number;
+  workloadScore: number;
+  taskCompletionRate: number;     // 0.0–1.0
+}
+
+export interface AttentionItem {
+  id: string;
+  severity: "critical" | "warning" | "info";
+  category: string;
+  message: string;
+  relatedNodeIds: string[];
 }

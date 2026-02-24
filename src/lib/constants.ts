@@ -35,6 +35,19 @@ export const EDGE_CONFIG: Record<
   PARTICIPATED_IN: { color: "rgba(244,63,94,0.5)",    width: 2,   label: "Participated In" },
 };
 
+export const PRIORITY_COLORS: Record<string, { color: string; width: number }> = {
+  // Named priorities
+  urgent: { color: "#ef4444", width: 2 },
+  high:   { color: "#f97316", width: 1.5 },
+  medium: { color: "#06b6d4", width: 0.8 },
+  low:    { color: "rgba(255,255,255,0.15)", width: 0.5 },
+  none:   { color: "rgba(255,255,255,0.15)", width: 0.5 },
+  // Numeric priorities (p0 = urgent, p1 = high, p2 = medium)
+  p0:     { color: "#ef4444", width: 2 },
+  p1:     { color: "#f97316", width: 1.5 },
+  p2:     { color: "#06b6d4", width: 0.8 },
+};
+
 export const CANVAS_BG = "#0f172a";
 
 export const DEFAULT_MESSAGE_LIMIT = 100;
@@ -44,8 +57,27 @@ export const ALL_NODE_TYPES: NodeType[] = [
   "insight", "task", "context", "message",
 ];
 
-// Messages OFF by default (too many for force graph)
+// Default view: minimal informative set (org + people + insights)
+// Users can add more types from the sidebar
 export const DEFAULT_ENABLED_TYPES = new Set<NodeType>([
-  "organization", "user", "channel", "contact",
-  "meeting", "insight", "task", "context",
+  "organization", "user", "insight",
 ]);
+
+// Preset views for quick switching
+export const VIEW_PRESETS: Record<string, { label: string; types: NodeType[]; description: string }> = {
+  intelligence: {
+    label: "Intelligence",
+    types: ["organization", "user", "insight", "task"],
+    description: "AI-generated insights and tasks linked to people. Best for understanding what the AI has surfaced and who owns what.",
+  },
+  people: {
+    label: "People",
+    types: ["organization", "user", "contact", "meeting"],
+    description: "People network — internal users, external contacts, and their meetings. Best for mapping relationships.",
+  },
+  full: {
+    label: "Full Graph",
+    types: ["organization", "user", "channel", "contact", "meeting", "insight", "task", "context"],
+    description: "The complete knowledge graph with all node types and connections. Best for full exploration.",
+  },
+};

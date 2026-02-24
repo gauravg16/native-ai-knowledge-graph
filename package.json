@@ -1,7 +1,17 @@
 {
   "name": "kg-web",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "main": "./src/lib/types.ts",
+  "exports": {
+    "./lib/*": "./src/lib/*",
+    "./components/*": "./src/components/*"
+  },
+  "files": [
+    "src/lib",
+    "src/components",
+    "src/types"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",

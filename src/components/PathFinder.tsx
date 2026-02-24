@@ -1,7 +1,7 @@
 "use client";
 
-import { GraphNode } from "@/lib/types";
-import { NODE_CONFIG } from "@/lib/constants";
+import { GraphNode } from "../lib/types";
+import { NODE_CONFIG } from "../lib/constants";
 
 interface PathFinderProps {
   isActive: boolean;

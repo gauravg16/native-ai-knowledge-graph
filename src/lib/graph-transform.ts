@@ -1,18 +1,19 @@
 /**
  * Transforms relational Supabase rows into {nodes, links} graph format.
- * TypeScript port of kg-mvp/src/transform.py — same logic, same FK validation.
+ * Uses identity-resolver.ts for person deduplication before node creation.
  */
 
 import {
   GraphNode,
   GraphLink,
-  GraphData,
   GraphStats,
   GraphResponse,
   NodeType,
   EdgeType,
 } from "./types";
-import { NODE_CONFIG } from "./constants";
+import { NODE_CONFIG, EDGE_CONFIG } from "./constants";
+import { buildIdentityIndex } from "./identity-resolver";
+import { deduplicateInsights, deduplicateTasks, deduplicateMeetings } from "./insight-deduplicator";
 
 /* ------------------------------------------------------------------ */
 /*  Input type from the API route                                      */
@@ -42,14 +43,14 @@ function nodeId(type: NodeType, uuid: string): string {
 }
 
 function makeNode(
-  type: NodeType,
   id: string,
+  type: NodeType,
   label: string,
   properties: Record<string, unknown>,
 ): GraphNode {
   const cfg = NODE_CONFIG[type];
   return {
-    id: nodeId(type, id),
+    id,
     type,
     label: label || "(unnamed)",
     properties,
@@ -65,101 +66,6 @@ function makeLink(source: string, target: string, type: EdgeType): GraphLink {
 function truncate(s: unknown, max: number): string {
   const str = typeof s === "string" ? s : "";
   return str.length > max ? str.slice(0, max) + "..." : str;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Name Resolver — fuzzy match text fields to contact/profile nodes   */
-/* ------------------------------------------------------------------ */
-
-type NameResolver = Map<string, string[]>;
-
-function buildNameResolver(
-  contacts: Record<string, unknown>[],
-  profiles: Record<string, unknown>[],
-): NameResolver {
-  const map: NameResolver = new Map();
-
-  const addEntry = (key: string, nodeIdStr: string) => {
-    const k = key.trim().toLowerCase();
-    if (!k || k.length < 2) return;
-    const existing = map.get(k);
-    if (existing) {
-      if (!existing.includes(nodeIdStr)) existing.push(nodeIdStr);
-    } else {
-      map.set(k, [nodeIdStr]);
-    }
-  };
-
-  // Index contacts by name, aliases, email
-  for (const c of contacts) {
-    const nid = nodeId("contact", c.id as string);
-    if (c.name) addEntry(c.name as string, nid);
-    if (c.email) addEntry(c.email as string, nid);
-    const aliases = Array.isArray(c.aliases) ? c.aliases : [];
-    for (const alias of aliases) {
-      if (typeof alias === "string") addEntry(alias, nid);
-    }
-  }
-
-  // Index profiles by full_name
-  for (const p of profiles) {
-    const nid = nodeId("user", p.id as string);
-    if (p.full_name) addEntry(p.full_name as string, nid);
-  }
-
-  return map;
-}
-
-function resolvePersonText(text: unknown, resolver: NameResolver): string[] {
-  if (typeof text !== "string" || !text.trim()) return [];
-  const normalized = text.trim().toLowerCase();
-
-  // 1. Exact lookup
-  const exact = resolver.get(normalized);
-  if (exact) return exact;
-
-  // 2. "Name <email>" format — try name part, then email part
-  const angleMatch = normalized.match(/^(.+?)\s*<(.+?)>$/);
-  if (angleMatch) {
-    const namePart = resolver.get(angleMatch[1].trim());
-    if (namePart) return namePart;
-    const emailPart = resolver.get(angleMatch[2].trim());
-    if (emailPart) return emailPart;
-  }
-
-  // 3. Strip honorifics
-  const honorifics = ["sir ", "mr ", "ms ", "mrs ", "dr "];
-  for (const h of honorifics) {
-    if (normalized.startsWith(h)) {
-      const stripped = resolver.get(normalized.slice(h.length));
-      if (stripped) return stripped;
-    }
-  }
-
-  // 4. No match (e.g., "Ai Assistant", "User", "Native")
-  return [];
-}
-
-function resolveMultiPerson(text: unknown, resolver: NameResolver): string[] {
-  if (typeof text !== "string" || !text.trim()) return [];
-
-  // Split on ", " and " and " (case-insensitive)
-  const fragments = text.split(/,\s*|\s+and\s+/i).map(s => s.trim()).filter(Boolean);
-
-  // If only one fragment, resolve directly (avoids splitting names like "Jasminder Singh Gulati")
-  if (fragments.length <= 1) return resolvePersonText(text, resolver);
-
-  const results: string[] = [];
-  const seen = new Set<string>();
-  for (const fragment of fragments) {
-    for (const id of resolvePersonText(fragment, resolver)) {
-      if (!seen.has(id)) {
-        seen.add(id);
-        results.push(id);
-      }
-    }
-  }
-  return results;
 }
 
 /* ------------------------------------------------------------------ */
@@ -182,14 +88,7 @@ export function transformToGraph(input: TransformInput): GraphResponse {
     byType[n.type]++;
   };
 
-  const link = (src: string, tgt: string, type: EdgeType) => {
-    if (ids.has(src) && ids.has(tgt)) {
-      links.push(makeLink(src, tgt, type));
-    }
-  };
-
-  // Helper to safely add a link where we know source exists but target may
-  // be added later — we'll filter dangling links at the end.
+  // Deferred links — validated against `ids` at the end.
   const linkDeferred: GraphLink[] = [];
   const deferLink = (src: string, tgt: string, type: EdgeType) => {
     linkDeferred.push(makeLink(src, tgt, type));
@@ -201,7 +100,7 @@ export function transformToGraph(input: TransformInput): GraphResponse {
     const o = input.org;
     orgNid = nodeId("organization", o.id as string);
     add(
-      makeNode("organization", o.id as string, o.name as string, {
+      makeNode(orgNid, "organization", o.name as string, {
         slug: o.slug,
         created_at: o.created_at,
         has_brain: o.business_brain_md != null,
@@ -209,70 +108,69 @@ export function transformToGraph(input: TransformInput): GraphResponse {
     );
   }
 
-  // Build name resolver from ALL contacts + profiles (regardless of enabledTypes)
-  const resolver = buildNameResolver(input.contacts, input.profiles);
+  // Build identity index from ALL contacts + profiles (regardless of enabledTypes)
+  const identity = buildIdentityIndex(input.contacts, input.profiles);
 
-  /* --- Users (profiles) --- */
-  if (input.enabledTypes.has("user")) {
-    for (const p of input.profiles) {
+  /* --- Person nodes (deduplicated users + contacts) --- */
+  const personEnabled =
+    input.enabledTypes.has("user") || input.enabledTypes.has("contact");
+
+  if (personEnabled) {
+    for (const [canonId, person] of identity.persons) {
+      // Filter by the preferred node type toggle
+      if (!input.enabledTypes.has(person.preferredType)) continue;
+
       add(
-        makeNode("user", p.id as string, (p.full_name as string) || "(no name)", {
-          role: p.role,
-          response_persona: p.response_persona,
-          created_at: p.created_at,
+        makeNode(canonId, person.preferredType, person.label, {
+          ...person.properties,
+          _merged: person.sourceIds.length > 1,
+          _sourceTypes:
+            person.profileIds.length > 0 && person.contactIds.length > 0
+              ? ["user", "contact"]
+              : [person.preferredType],
         }),
       );
-      if (orgNid) deferLink(nodeId("user", p.id as string), orgNid, "MEMBER_OF");
+
+      // MEMBER_OF: only for users (profiles)
+      if (orgNid && person.preferredType === "user") {
+        deferLink(canonId, orgNid, "MEMBER_OF");
+      }
     }
   }
 
   /* --- Channels --- */
   if (input.enabledTypes.has("channel")) {
     for (const ch of input.channels) {
+      const chNid = nodeId("channel", ch.id as string);
       add(
-        makeNode("channel", ch.id as string, ch.name as string, {
+        makeNode(chNid, "channel", ch.name as string, {
           type: ch.type,
           description: ch.description,
           member_count: ch.member_count,
           created_at: ch.created_at,
         }),
       );
-      if (orgNid) deferLink(nodeId("channel", ch.id as string), orgNid, "HAS_CHANNEL");
+      if (orgNid) deferLink(chNid, orgNid, "HAS_CHANNEL");
     }
   }
 
-  /* --- Contacts --- */
-  if (input.enabledTypes.has("contact")) {
-    for (const c of input.contacts) {
-      add(
-        makeNode("contact", c.id as string, c.name as string, {
-          email: c.email,
-          role: c.role,
-          department: c.department,
-          relationship_type: c.relationship_type,
-          company_name: c.company_name,
-          location: c.location,
-          is_primary_contact: c.is_primary_contact,
-          tags: c.tags,
-          created_at: c.created_at,
-        }),
-      );
-      if (c.reports_to) {
-        deferLink(
-          nodeId("contact", c.id as string),
-          nodeId("contact", c.reports_to as string),
-          "REPORTS_TO",
-        );
-      }
-    }
-  }
-
-  /* --- Meetings --- */
+  /* --- Meetings (deduplicated) --- */
   if (input.enabledTypes.has("meeting")) {
-    for (const m of input.meetings) {
+    const { meetings: dedupedMeetings, stats: meetingDedupeStats } =
+      deduplicateMeetings(input.meetings);
+
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[meeting-dedup] ${meetingDedupeStats.inputCount} → ${meetingDedupeStats.outputCount} ` +
+          `(noise: -${meetingDedupeStats.noiseDropped}, dupes: -${meetingDedupeStats.duplicatesDropped})`,
+      );
+    }
+
+    for (const m of dedupedMeetings) {
       const parts = Array.isArray(m.participants) ? m.participants : [];
+      const mNid = nodeId("meeting", m.id as string);
       add(
-        makeNode("meeting", m.id as string, (m.title as string) || "(untitled)", {
+        makeNode(mNid, "meeting", (m.title as string) || "(untitled)", {
           platform: m.platform,
           started_at: m.started_at,
           ended_at: m.ended_at,
@@ -283,18 +181,31 @@ export function transformToGraph(input: TransformInput): GraphResponse {
       );
       // Resolve participants → person edges
       for (const participant of parts) {
-        for (const personId of resolvePersonText(participant, resolver)) {
-          deferLink(personId, nodeId("meeting", m.id as string), "PARTICIPATED_IN");
+        const personId = identity.resolve(participant as string);
+        if (personId) {
+          deferLink(personId, mNid, "PARTICIPATED_IN");
         }
       }
     }
   }
 
-  /* --- Insights --- */
+  /* --- Insights (deduplicated) --- */
   if (input.enabledTypes.has("insight")) {
-    for (const i of input.insights) {
+    const { insights: dedupedInsights, stats: dedupeStats } =
+      deduplicateInsights(input.insights);
+
+    // Log dedup stats in dev for debugging
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[insight-dedup] ${dedupeStats.inputCount} → ${dedupeStats.outputCount} ` +
+          `(noise: -${dedupeStats.noiseDropped}, dupes: -${dedupeStats.duplicatesDropped})`,
+      );
+    }
+
+    for (const i of dedupedInsights) {
+      const iNid = nodeId("insight", i.id as string);
       add(
-        makeNode("insight", i.id as string, (i.title as string) || "(untitled)", {
+        makeNode(iNid, "insight", (i.title as string) || "(untitled)", {
           type: i.type,
           summary: truncate(i.summary, 300),
           confidence: i.confidence,
@@ -304,27 +215,35 @@ export function transformToGraph(input: TransformInput): GraphResponse {
           created_at: i.created_at,
         }),
       );
-      // Resolve owner text → person edges
+      // Resolve owner text → person edge
       if (i.owner) {
-        for (const personId of resolvePersonText(i.owner, resolver)) {
-          deferLink(nodeId("insight", i.id as string), personId, "OWNED_BY");
+        const personId = identity.resolve(i.owner as string);
+        if (personId) {
+          deferLink(iNid, personId, "OWNED_BY");
         }
       }
       if (i.meeting_id) {
-        deferLink(
-          nodeId("insight", i.id as string),
-          nodeId("meeting", i.meeting_id as string),
-          "FROM_MEETING",
-        );
+        deferLink(iNid, nodeId("meeting", i.meeting_id as string), "FROM_MEETING");
       }
     }
   }
 
-  /* --- Tasks --- */
+  /* --- Tasks (deduplicated) --- */
   if (input.enabledTypes.has("task")) {
-    for (const t of input.tasks) {
+    const { tasks: dedupedTasks, stats: taskDedupeStats } =
+      deduplicateTasks(input.tasks);
+
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[task-dedup] ${taskDedupeStats.inputCount} → ${taskDedupeStats.outputCount} ` +
+          `(noise: -${taskDedupeStats.noiseDropped}, dupes: -${taskDedupeStats.duplicatesDropped})`,
+      );
+    }
+
+    for (const t of dedupedTasks) {
+      const tNid = nodeId("task", t.id as string);
       add(
-        makeNode("task", t.id as string, (t.title as string) || "(untitled)", {
+        makeNode(tNid, "task", (t.title as string) || "(untitled)", {
           assignee: t.assignee,
           state: t.state,
           priority: t.priority,
@@ -332,18 +251,14 @@ export function transformToGraph(input: TransformInput): GraphResponse {
           created_at: t.created_at,
         }),
       );
-      // Resolve assignee text → person edges
+      // Resolve assignee text → person edges (may be multi-person)
       if (t.assignee) {
-        for (const personId of resolveMultiPerson(t.assignee, resolver)) {
-          deferLink(nodeId("task", t.id as string), personId, "ASSIGNED_TO");
+        for (const personId of identity.resolveMulti(t.assignee as string)) {
+          deferLink(tNid, personId, "ASSIGNED_TO");
         }
       }
       if (t.source_insight_id) {
-        deferLink(
-          nodeId("task", t.id as string),
-          nodeId("insight", t.source_insight_id as string),
-          "FROM_INSIGHT",
-        );
+        deferLink(tNid, nodeId("insight", t.source_insight_id as string), "FROM_INSIGHT");
       }
     }
   }
@@ -351,8 +266,9 @@ export function transformToGraph(input: TransformInput): GraphResponse {
   /* --- Contexts --- */
   if (input.enabledTypes.has("context")) {
     for (const cx of input.contexts) {
+      const cxNid = nodeId("context", cx.id as string);
       add(
-        makeNode("context", cx.id as string, (cx.title as string) || "(untitled)", {
+        makeNode(cxNid, "context", (cx.title as string) || "(untitled)", {
           content_preview: truncate(cx.content, 300),
           tags: cx.tags,
           source_id: cx.source_id,
@@ -360,11 +276,7 @@ export function transformToGraph(input: TransformInput): GraphResponse {
         }),
       );
       if (cx.meeting_id) {
-        deferLink(
-          nodeId("context", cx.id as string),
-          nodeId("meeting", cx.meeting_id as string),
-          "FROM_MEETING",
-        );
+        deferLink(cxNid, nodeId("meeting", cx.meeting_id as string), "FROM_MEETING");
       }
     }
   }
@@ -373,60 +285,56 @@ export function transformToGraph(input: TransformInput): GraphResponse {
   if (input.enabledTypes.has("message")) {
     for (const m of input.messages) {
       const content = (m.content as string) || "";
+      const msgNid = nodeId("message", m.id as string);
       add(
-        makeNode(
-          "message",
-          m.id as string,
-          truncate(content, 60),
-          {
-            content_preview: truncate(content, 200),
-            is_ai_response: !!m.is_ai_response,
-            status: m.status,
-            created_at: m.created_at,
-            mention_count: m.mention_count,
-          },
-        ),
+        makeNode(msgNid, "message", truncate(content, 60), {
+          content_preview: truncate(content, 200),
+          is_ai_response: !!m.is_ai_response,
+          status: m.status,
+          created_at: m.created_at,
+          mention_count: m.mention_count,
+        }),
       );
       if (m.channel_id) {
-        deferLink(
-          nodeId("message", m.id as string),
-          nodeId("channel", m.channel_id as string),
-          "POSTED_IN",
-        );
+        deferLink(msgNid, nodeId("channel", m.channel_id as string), "POSTED_IN");
       }
+      // AUTHORED_BY: map raw profile UUID → canonical person ID
       if (m.author_id) {
-        deferLink(
-          nodeId("message", m.id as string),
-          nodeId("user", m.author_id as string),
-          "AUTHORED_BY",
-        );
+        const canonAuthor = identity.profileToCanonical(m.author_id as string);
+        if (canonAuthor) {
+          deferLink(msgNid, canonAuthor, "AUTHORED_BY");
+        }
       }
       if (m.reply_to_id) {
-        deferLink(
-          nodeId("message", m.id as string),
-          nodeId("message", m.reply_to_id as string),
-          "REPLIES_TO",
-        );
+        deferLink(msgNid, nodeId("message", m.reply_to_id as string), "REPLIES_TO");
       }
     }
   }
 
   /* --- Join-table edges: Mentions --- */
   for (const mention of input.mentions) {
-    deferLink(
-      nodeId("message", mention.message_id as string),
-      nodeId("user", mention.mentioned_user_id as string),
-      "MENTIONS",
+    const canonUser = identity.profileToCanonical(
+      mention.mentioned_user_id as string,
     );
+    if (canonUser) {
+      deferLink(
+        nodeId("message", mention.message_id as string),
+        canonUser,
+        "MENTIONS",
+      );
+    }
   }
 
   /* --- Join-table edges: Read By --- */
   for (const read of input.reads) {
-    deferLink(
-      nodeId("message", read.message_id as string),
-      nodeId("user", read.user_id as string),
-      "READ_BY",
-    );
+    const canonUser = identity.profileToCanonical(read.user_id as string);
+    if (canonUser) {
+      deferLink(
+        nodeId("message", read.message_id as string),
+        canonUser,
+        "READ_BY",
+      );
+    }
   }
 
   /* --- Filter out dangling links --- */
@@ -434,11 +342,21 @@ export function transformToGraph(input: TransformInput): GraphResponse {
     (l) => ids.has(l.source as string) && ids.has(l.target as string),
   );
 
+  /* --- Compute edge counts --- */
+  const edgeCounts = {} as Record<EdgeType, number>;
+  for (const et of Object.keys(EDGE_CONFIG) as EdgeType[]) {
+    edgeCounts[et] = 0;
+  }
+  for (const l of validLinks) {
+    edgeCounts[l.type] = (edgeCounts[l.type] || 0) + 1;
+  }
+
   const stats: GraphStats = {
     totalNodes: nodes.length,
     totalLinks: validLinks.length,
     byType,
     orgName: input.org ? (input.org.name as string) : "Unknown",
+    edgeCounts,
   };
 
   return {
